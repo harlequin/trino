@@ -145,7 +145,6 @@ import static org.apache.iceberg.TableProperties.OBJECT_STORE_PATH;
 import static org.apache.iceberg.TableProperties.WRITE_DATA_LOCATION;
 import static org.apache.iceberg.TableProperties.WRITE_LOCATION_PROVIDER_IMPL;
 import static org.apache.iceberg.TableProperties.WRITE_METADATA_LOCATION;
-import static org.apache.iceberg.TableProperties.WRITE_NEW_DATA_LOCATION;
 import static org.apache.iceberg.types.Type.TypeID.BINARY;
 import static org.apache.iceberg.types.Type.TypeID.FIXED;
 
@@ -261,6 +260,14 @@ public final class IcebergUtil
                 Optional.ofNullable(column.doc()));
     }
 
+    public static Schema schemaFromHandles(List<IcebergColumnHandle> columns)
+    {
+        List<NestedField> icebergColumns = columns.stream()
+                .map(column -> NestedField.optional(column.getId(), column.getName(), toIcebergType(column.getType())))
+                .collect(toImmutableList());
+        return new Schema(StructType.of(icebergColumns).asStructType().fields());
+    }
+
     public static Map<PartitionField, Integer> getIdentityPartitions(PartitionSpec partitionSpec)
     {
         // TODO: expose transform information in Iceberg library
@@ -330,9 +337,15 @@ public final class IcebergUtil
         return '"' + name.replace("\"", "\"\"") + '"';
     }
 
-    public static boolean canEnforceColumnConstraintInAllSpecs(TypeOperators typeOperators, Table table, IcebergColumnHandle columnHandle, Domain domain)
+    public static boolean canEnforceColumnConstraintInSpecs(
+            TypeOperators typeOperators,
+            Table table,
+            Set<Integer> partitionSpecIds,
+            IcebergColumnHandle columnHandle,
+            Domain domain)
     {
         return table.specs().values().stream()
+                .filter(partitionSpec -> partitionSpecIds.contains(partitionSpec.specId()))
                 .allMatch(spec -> canEnforceConstraintWithinPartitioningSpec(typeOperators, spec, columnHandle, domain));
     }
 
@@ -557,7 +570,7 @@ public final class IcebergUtil
         return locationsFor(tableLocation, storageProperties);
     }
 
-    public static Schema toIcebergSchema(List<ColumnMetadata> columns)
+    public static Schema schemaFromMetadata(List<ColumnMetadata> columns)
     {
         List<NestedField> icebergColumns = new ArrayList<>();
         for (ColumnMetadata column : columns) {
@@ -577,7 +590,7 @@ public final class IcebergUtil
     public static Transaction newCreateTableTransaction(TrinoCatalog catalog, ConnectorTableMetadata tableMetadata, ConnectorSession session)
     {
         SchemaTableName schemaTableName = tableMetadata.getTable();
-        Schema schema = toIcebergSchema(tableMetadata.getColumns());
+        Schema schema = schemaFromMetadata(tableMetadata.getColumns());
         PartitionSpec partitionSpec = parsePartitionFields(schema, getPartitioning(tableMetadata.getProperties()));
         String targetPath = getTableLocation(tableMetadata.getProperties())
                 .orElseGet(() -> catalog.defaultTableLocation(session, schemaTableName));
@@ -617,7 +630,7 @@ public final class IcebergUtil
     {
         // TODO: support path override in Iceberg table creation: https://github.com/trinodb/trino/issues/8861
         if (table.properties().containsKey(OBJECT_STORE_PATH) ||
-                table.properties().containsKey(WRITE_NEW_DATA_LOCATION) ||
+                table.properties().containsKey("write.folder-storage.path") || // Removed from Iceberg as of 0.14.0, but preserved for backward compatibility
                 table.properties().containsKey(WRITE_METADATA_LOCATION) ||
                 table.properties().containsKey(WRITE_DATA_LOCATION)) {
             throw new TrinoException(NOT_SUPPORTED, "Table contains Iceberg path override properties and cannot be dropped from Trino: " + table.name());

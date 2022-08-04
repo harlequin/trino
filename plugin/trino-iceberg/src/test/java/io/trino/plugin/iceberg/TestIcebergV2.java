@@ -224,6 +224,32 @@ public class TestIcebergV2
     }
 
     @Test
+    public void testSelectivelyOptimizingLeavesEqualityDeletes()
+            throws Exception
+    {
+        String tableName = "test_selectively_optimizing_leaves_eq_deletes_" + randomTableSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " WITH (partitioning = ARRAY['nationkey']) AS SELECT * FROM tpch.tiny.nation", 25);
+        Table icebergTable = loadTable(tableName);
+        writeEqualityDeleteToNationTable(icebergTable, Optional.of(icebergTable.spec()), Optional.of(new PartitionData(new Long[]{1L})));
+        query("ALTER TABLE " + tableName + " EXECUTE OPTIMIZE WHERE nationkey < 5");
+        assertQuery("SELECT * FROM " + tableName, "SELECT * FROM nation WHERE regionkey != 1 OR nationkey != 1");
+        Assertions.assertThat(loadTable(tableName).currentSnapshot().summary().get("total-equality-deletes")).isEqualTo("1");
+    }
+
+    @Test
+    public void testOptimizingWholeTableRemovesEqualityDeletes()
+            throws Exception
+    {
+        String tableName = "test_optimizing_whole_table_removes_eq_deletes_" + randomTableSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " WITH (partitioning = ARRAY['nationkey']) AS SELECT * FROM tpch.tiny.nation", 25);
+        Table icebergTable = loadTable(tableName);
+        writeEqualityDeleteToNationTable(icebergTable, Optional.of(icebergTable.spec()), Optional.of(new PartitionData(new Long[]{1L})));
+        query("ALTER TABLE " + tableName + " EXECUTE OPTIMIZE");
+        assertQuery("SELECT * FROM " + tableName, "SELECT * FROM nation WHERE regionkey != 1 OR nationkey != 1");
+        Assertions.assertThat(loadTable(tableName).currentSnapshot().summary().get("total-equality-deletes")).isEqualTo("0");
+    }
+
+    @Test
     public void testOptimizingV2TableWithEmptyPartitionSpec()
             throws Exception
     {
@@ -250,7 +276,7 @@ public class TestIcebergV2
         assertUpdate("CREATE TABLE " + tableName + " WITH (partitioning = ARRAY['regionkey']) AS SELECT * FROM tpch.tiny.nation", 25);
         Table icebergTable = updateTableToV2(tableName);
         Assertions.assertThat(icebergTable.currentSnapshot().summary().get("total-equality-deletes")).isEqualTo("0");
-        writeEqualityDeleteToNationTable(icebergTable, Optional.of(icebergTable.spec()), Optional.of(new PartitionData(new Long[]{1L, 2L, 3L, 4L})));
+        writeEqualityDeleteToNationTable(icebergTable, Optional.of(icebergTable.spec()), Optional.of(new PartitionData(new Long[]{1L})));
         List<String> initialActiveFiles = getActiveFiles(tableName);
         assertQuery("SELECT * FROM " + tableName, "SELECT * FROM nation WHERE regionkey != 1");
         query("ALTER TABLE " + tableName + " EXECUTE OPTIMIZE WHERE regionkey != 1");
@@ -397,9 +423,9 @@ public class TestIcebergV2
 
         assertThat(this.loadTable(tableName).newScan().planFiles()).hasSize(1);
         // Ensure only one snapshot is committed to the table
-        Long initialSnapshotId = (Long) computeActual("SELECT snapshot_id FROM \"" + tableName + "$snapshots\" ORDER BY committed_at DESC LIMIT 1").getOnlyValue();
+        long initialSnapshotId = (long) computeScalar("SELECT snapshot_id FROM \"" + tableName + "$snapshots\" ORDER BY committed_at DESC FETCH FIRST 1 ROW WITH TIES");
         assertUpdate("DELETE FROM " + tableName + " WHERE regionkey < 10", 25);
-        Long parentSnapshotId = (Long) computeActual("SELECT parent_id FROM \"" + tableName + "$snapshots\" ORDER BY committed_at DESC LIMIT 1").getOnlyValue();
+        long parentSnapshotId = (long) computeScalar("SELECT parent_id FROM \"" + tableName + "$snapshots\" ORDER BY committed_at DESC FETCH FIRST 1 ROW WITH TIES");
         assertEquals(initialSnapshotId, parentSnapshotId);
         assertThat(query("SELECT * FROM " + tableName)).returnsEmptyResult();
         assertThat(this.loadTable(tableName).newScan().planFiles()).hasSize(0);
@@ -413,9 +439,9 @@ public class TestIcebergV2
         assertUpdate("CREATE TABLE " + tableName + " AS SELECT * FROM tpch.tiny.nation", 25);
         assertThat(this.loadTable(tableName).newScan().planFiles()).hasSize(1);
         // Ensure only one snapshot is committed to the table
-        Long initialSnapshotId = (Long) computeActual("SELECT snapshot_id FROM \"" + tableName + "$snapshots\" ORDER BY committed_at DESC LIMIT 1").getOnlyValue();
+        long initialSnapshotId = (long) computeScalar("SELECT snapshot_id FROM \"" + tableName + "$snapshots\" ORDER BY committed_at DESC FETCH FIRST 1 ROW WITH TIES");
         assertUpdate("DELETE FROM " + tableName + " WHERE regionkey % 2 = 1", "SELECT count(*) FROM nation WHERE regionkey % 2 = 1");
-        Long parentSnapshotId = (Long) computeActual("SELECT parent_id FROM \"" + tableName + "$snapshots\" ORDER BY committed_at DESC LIMIT 1").getOnlyValue();
+        long parentSnapshotId = (long) computeScalar("SELECT parent_id FROM \"" + tableName + "$snapshots\" ORDER BY committed_at DESC FETCH FIRST 1 ROW WITH TIES");
         assertEquals(initialSnapshotId, parentSnapshotId);
 
         assertUpdate("DELETE FROM " + tableName + " WHERE regionkey % 2 = 0", "SELECT count(*) FROM nation WHERE regionkey % 2 = 0");

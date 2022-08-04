@@ -24,7 +24,6 @@ import io.airlift.slice.Slice;
 import io.airlift.stats.TestingGcMonitor;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
-import io.trino.connector.CatalogName;
 import io.trino.execution.buffer.BufferResult;
 import io.trino.execution.buffer.BufferState;
 import io.trino.execution.buffer.OutputBuffer;
@@ -50,7 +49,6 @@ import io.trino.spi.QueryId;
 import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.UpdatablePageSource;
-import io.trino.spi.type.Type;
 import io.trino.spiller.SpillSpaceTracker;
 import io.trino.sql.planner.LocalExecutionPlanner.LocalExecutionPlan;
 import io.trino.sql.planner.plan.PlanNodeId;
@@ -82,7 +80,7 @@ import static io.trino.execution.buffer.OutputBuffers.BufferType.PARTITIONED;
 import static io.trino.execution.buffer.OutputBuffers.createInitialEmptyOutputBuffers;
 import static io.trino.execution.buffer.PagesSerde.getSerializedPagePositionCount;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.testing.TestingHandles.TEST_CATALOG_HANDLE;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.HOURS;
@@ -94,7 +92,6 @@ import static org.testng.Assert.assertFalse;
 public class TestSqlTaskExecution
 {
     private static final OutputBufferId OUTPUT_BUFFER_ID = new OutputBufferId(0);
-    private static final CatalogName CONNECTOR_ID = new CatalogName("test");
     private static final Duration ASSERT_WAIT_TIMEOUT = new Duration(1, HOURS);
     public static final TaskId TASK_ID = new TaskId(new StageId("query", 0), 0, 0);
 
@@ -122,7 +119,7 @@ public class TestSqlTaskExecution
             //      |
             //    Scan
             //
-            TestingScanOperatorFactory testingScanOperatorFactory = new TestingScanOperatorFactory(0, TABLE_SCAN_NODE_ID, ImmutableList.of(VARCHAR));
+            TestingScanOperatorFactory testingScanOperatorFactory = new TestingScanOperatorFactory(0, TABLE_SCAN_NODE_ID);
             TaskOutputOperatorFactory taskOutputOperatorFactory = new TaskOutputOperatorFactory(
                     1,
                     TABLE_SCAN_NODE_ID,
@@ -287,7 +284,7 @@ public class TestSqlTaskExecution
 
     private ScheduledSplit newScheduledSplit(int sequenceId, PlanNodeId planNodeId, int begin, int count)
     {
-        return new ScheduledSplit(sequenceId, planNodeId, new Split(CONNECTOR_ID, new TestingSplit(begin, begin + count)));
+        return new ScheduledSplit(sequenceId, planNodeId, new Split(TEST_CATALOG_HANDLE, new TestingSplit(begin, begin + count)));
     }
 
     public static class Pauser
@@ -337,8 +334,7 @@ public class TestSqlTaskExecution
 
         public TestingScanOperatorFactory(
                 int operatorId,
-                PlanNodeId sourceId,
-                List<Type> types)
+                PlanNodeId sourceId)
         {
             this.operatorId = operatorId;
             this.sourceId = requireNonNull(sourceId, "sourceId is null");

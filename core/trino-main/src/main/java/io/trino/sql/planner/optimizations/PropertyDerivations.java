@@ -44,6 +44,7 @@ import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
 import io.trino.sql.planner.plan.DeleteNode;
 import io.trino.sql.planner.plan.DistinctLimitNode;
+import io.trino.sql.planner.plan.DynamicFilterSourceNode;
 import io.trino.sql.planner.plan.EnforceSingleRowNode;
 import io.trino.sql.planner.plan.ExchangeNode;
 import io.trino.sql.planner.plan.ExplainAnalyzeNode;
@@ -598,6 +599,12 @@ public final class PropertyDerivations
         }
 
         @Override
+        public ActualProperties visitDynamicFilterSource(DynamicFilterSourceNode node, List<ActualProperties> inputProperties)
+        {
+            return Iterables.getOnlyElement(inputProperties);
+        }
+
+        @Override
         public ActualProperties visitIndexSource(IndexSourceNode node, List<ActualProperties> context)
         {
             return ActualProperties.builder()
@@ -646,9 +653,13 @@ public final class PropertyDerivations
                 if (inputProperties.size() == 1) {
                     ActualProperties inputProperty = inputProperties.get(0);
                     if (inputProperty.isEffectivelySingleStream() && node.getOrderingScheme().isEmpty()) {
+                        verify(node.getInputs().size() == 1);
+                        Map<Symbol, Symbol> inputToOutput = exchangeInputToOutput(node, 0);
                         // Single stream input's local sorting and grouping properties are preserved
                         // In case of merging exchange, it's orderingScheme takes precedence
-                        localProperties.addAll(inputProperty.getLocalProperties());
+                        localProperties.addAll(LocalProperties.translate(
+                                inputProperty.getLocalProperties(),
+                                symbol -> Optional.ofNullable(inputToOutput.get(symbol))));
                     }
                 }
 

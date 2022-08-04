@@ -19,13 +19,13 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.units.DataSize;
 import io.trino.Session;
 import io.trino.execution.QueryInfo;
-import io.trino.plugin.deltalake.util.DockerizedMinioDataLake;
+import io.trino.plugin.hive.containers.HiveMinioDataLake;
 import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
+import io.trino.testing.MaterializedResultWithQueryId;
 import io.trino.testing.MaterializedRow;
 import io.trino.testing.QueryRunner;
-import io.trino.testing.ResultWithQueryId;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.testing.sql.TestTable;
 import io.trino.tpch.TpchTable;
@@ -42,7 +42,6 @@ import java.util.Set;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Sets.union;
-import static io.trino.plugin.deltalake.DeltaLakeDockerizedMinioDataLake.createDockerizedMinioDataLakeForDeltaLake;
 import static io.trino.plugin.deltalake.DeltaLakeQueryRunner.DELTA_CATALOG;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.TRANSACTION_LOG_DIRECTORY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -62,7 +61,7 @@ public abstract class BaseDeltaLakeMinioConnectorTest
 
     protected String bucketName;
     protected String resourcePath;
-    protected DockerizedMinioDataLake dockerizedMinioDataLake;
+    protected HiveMinioDataLake hiveMinioDataLake;
 
     public BaseDeltaLakeMinioConnectorTest(String bucketName, String resourcePath)
     {
@@ -74,19 +73,20 @@ public abstract class BaseDeltaLakeMinioConnectorTest
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        this.dockerizedMinioDataLake = closeAfterClass(createDockerizedMinioDataLakeForDeltaLake(bucketName, Optional.empty()));
+        hiveMinioDataLake = closeAfterClass(new HiveMinioDataLake(bucketName));
+        hiveMinioDataLake.start();
         QueryRunner queryRunner = DeltaLakeQueryRunner.createS3DeltaLakeQueryRunner(
                 DELTA_CATALOG,
                 SCHEMA,
                 ImmutableMap.<String, String>builder()
                         .put("delta.enable-non-concurrent-writes", "true")
                         .buildOrThrow(),
-                dockerizedMinioDataLake.getMinioAddress(),
-                dockerizedMinioDataLake.getTestingHadoop());
+                hiveMinioDataLake.getMinioAddress(),
+                hiveMinioDataLake.getHiveHadoop());
         queryRunner.execute("CREATE SCHEMA " + SCHEMA + " WITH (location = 's3://" + bucketName + "/" + SCHEMA + "')");
         TpchTable.getTables().forEach(table -> {
             String tableName = table.getTableName();
-            dockerizedMinioDataLake.copyResources(resourcePath + tableName, SCHEMA + "/" + tableName);
+            hiveMinioDataLake.copyResources(resourcePath + tableName, SCHEMA + "/" + tableName);
             queryRunner.execute(format("CREATE TABLE %1$s.%2$s.%3$s (dummy int) WITH (location = 's3://%4$s/%2$s/%3$s')",
                     DELTA_CATALOG,
                     SCHEMA,
@@ -336,7 +336,7 @@ public abstract class BaseDeltaLakeMinioConnectorTest
         assertUpdate("INSERT INTO " + tableName + " VALUES (TIMESTAMP '" + value + "')", 1);
 
         DistributedQueryRunner queryRunner = (DistributedQueryRunner) getQueryRunner();
-        ResultWithQueryId<MaterializedResult> queryResult = queryRunner.executeWithQueryId(
+        MaterializedResultWithQueryId queryResult = queryRunner.executeWithQueryId(
                 getSession(),
                 "SELECT * FROM " + tableName + " WHERE t < TIMESTAMP '" + value + "'");
         assertEquals(getQueryInfo(queryRunner, queryResult).getQueryStats().getProcessedInputDataSize().toBytes(), 0);
@@ -394,7 +394,7 @@ public abstract class BaseDeltaLakeMinioConnectorTest
         }
     }
 
-    private QueryInfo getQueryInfo(DistributedQueryRunner queryRunner, ResultWithQueryId<MaterializedResult> queryResult)
+    private QueryInfo getQueryInfo(DistributedQueryRunner queryRunner, MaterializedResultWithQueryId queryResult)
     {
         return queryRunner.getCoordinator().getQueryManager().getFullQueryInfo(queryResult.getQueryId());
     }
@@ -494,6 +494,24 @@ public abstract class BaseDeltaLakeMinioConnectorTest
         }
     }
 
+    @Test
+    public void testPathColumn()
+    {
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_path_column", "(x VARCHAR)")) {
+            assertUpdate("INSERT INTO " + table.getName() + " SELECT 'first'", 1);
+            String firstFilePath = (String) computeScalar("SELECT \"$path\" FROM " + table.getName());
+            assertUpdate("INSERT INTO " + table.getName() + " SELECT 'second'", 1);
+            String secondFilePath = (String) computeScalar("SELECT \"$path\" FROM " + table.getName() + " WHERE x = 'second'");
+
+            // Verify predicate correctness on $path column
+            assertQuery("SELECT x FROM " + table.getName() + " WHERE \"$path\" = '" + firstFilePath + "'", "VALUES 'first'");
+            assertQuery("SELECT x FROM " + table.getName() + " WHERE \"$path\" <> '" + firstFilePath + "'", "VALUES 'second'");
+            assertQuery("SELECT x FROM " + table.getName() + " WHERE \"$path\" IN ('" + firstFilePath + "', '" + secondFilePath + "')", "VALUES ('first'), ('second')");
+            assertQuery("SELECT x FROM " + table.getName() + " WHERE \"$path\" IS NOT NULL", "VALUES ('first'), ('second')");
+            assertQueryReturnsEmptyResult("SELECT x FROM " + table.getName() + " WHERE \"$path\" IS NULL");
+        }
+    }
+
     @Override
     protected String createSchemaSql(String schemaName)
     {
@@ -533,7 +551,7 @@ public abstract class BaseDeltaLakeMinioConnectorTest
 
     private List<String> getTableFiles(String tableName)
     {
-        return dockerizedMinioDataLake.listFiles(format("%s/%s", SCHEMA, tableName)).stream()
+        return hiveMinioDataLake.listFiles(format("%s/%s", SCHEMA, tableName)).stream()
                 .map(path -> format("s3://%s/%s", bucketName, path))
                 .collect(toImmutableList());
     }

@@ -15,15 +15,17 @@ package io.trino.plugin.iceberg;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.MoreObjects.ToStringHelper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.plugin.iceberg.delete.TrinoDeleteFile;
+import io.trino.plugin.iceberg.delete.DeleteFile;
 import io.trino.spi.HostAddress;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.connector.ConnectorSplit;
 import org.openjdk.jol.info.ClassLayout;
 
 import java.util.List;
+import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
@@ -43,7 +45,8 @@ public class IcebergSplit
     private final List<HostAddress> addresses;
     private final String partitionSpecJson;
     private final String partitionDataJson;
-    private final List<TrinoDeleteFile> deletes;
+    private final Optional<String> schemaAsJson;
+    private final List<DeleteFile> deletes;
     private final SplitWeight splitWeight;
 
     @JsonCreator
@@ -57,7 +60,8 @@ public class IcebergSplit
             @JsonProperty("addresses") List<HostAddress> addresses,
             @JsonProperty("partitionSpecJson") String partitionSpecJson,
             @JsonProperty("partitionDataJson") String partitionDataJson,
-            @JsonProperty("deletes") List<TrinoDeleteFile> deletes,
+            @JsonProperty("schemaAsJson") Optional<String> schemaAsJson,
+            @JsonProperty("deletes") List<DeleteFile> deletes,
             @JsonProperty("splitWeight") SplitWeight splitWeight)
     {
         this.path = requireNonNull(path, "path is null");
@@ -69,6 +73,7 @@ public class IcebergSplit
         this.addresses = ImmutableList.copyOf(requireNonNull(addresses, "addresses is null"));
         this.partitionSpecJson = requireNonNull(partitionSpecJson, "partitionSpecJson is null");
         this.partitionDataJson = requireNonNull(partitionDataJson, "partitionDataJson is null");
+        this.schemaAsJson = requireNonNull(schemaAsJson, "schemaAsJson is null");
         this.deletes = ImmutableList.copyOf(requireNonNull(deletes, "deletes is null"));
         this.splitWeight = requireNonNull(splitWeight, "splitWeight is null");
     }
@@ -129,13 +134,19 @@ public class IcebergSplit
     }
 
     @JsonProperty
+    public Optional<String> getSchemaAsJson()
+    {
+        return schemaAsJson;
+    }
+
+    @JsonProperty
     public String getPartitionDataJson()
     {
         return partitionDataJson;
     }
 
     @JsonProperty
-    public List<TrinoDeleteFile> getDeletes()
+    public List<DeleteFile> getDeletes()
     {
         return deletes;
     }
@@ -165,17 +176,23 @@ public class IcebergSplit
                 + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes)
                 + estimatedSizeOf(partitionSpecJson)
                 + estimatedSizeOf(partitionDataJson)
-                + estimatedSizeOf(deletes, TrinoDeleteFile::getRetainedSizeInBytes)
+                + estimatedSizeOf(deletes, DeleteFile::getRetainedSizeInBytes)
                 + splitWeight.getRetainedSizeInBytes();
     }
 
     @Override
     public String toString()
     {
-        return toStringHelper(this)
+        ToStringHelper helper = toStringHelper(this)
                 .addValue(path)
-                .addValue(start)
-                .addValue(length)
-                .toString();
+                .add("start", start)
+                .add("length", length)
+                .add("records", fileRecordCount);
+        if (!deletes.isEmpty()) {
+            helper.add("deleteFiles", deletes.size());
+            helper.add("deleteRecords", deletes.stream()
+                    .mapToLong(DeleteFile::recordCount).sum());
+        }
+        return helper.toString();
     }
 }

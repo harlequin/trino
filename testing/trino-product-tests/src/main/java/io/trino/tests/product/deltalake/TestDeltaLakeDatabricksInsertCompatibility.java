@@ -14,6 +14,7 @@
 package io.trino.tests.product.deltalake;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.tempto.BeforeTestWithContext;
 import io.trino.tempto.assertions.QueryAssert.Row;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -30,6 +31,8 @@ import static io.trino.tests.product.TestGroups.DELTA_LAKE_DATABRICKS;
 import static io.trino.tests.product.TestGroups.DELTA_LAKE_EXCLUDE_73;
 import static io.trino.tests.product.TestGroups.DELTA_LAKE_OSS;
 import static io.trino.tests.product.TestGroups.PROFILE_SPECIFIC_TESTS;
+import static io.trino.tests.product.deltalake.util.DeltaLakeTestUtils.DATABRICKS_104_RUNTIME_VERSION;
+import static io.trino.tests.product.deltalake.util.DeltaLakeTestUtils.getDatabricksRuntimeVersion;
 import static io.trino.tests.product.hive.util.TemporaryHiveTable.randomTableSuffix;
 import static io.trino.tests.product.utils.QueryExecutors.onDelta;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
@@ -38,6 +41,15 @@ import static java.util.Arrays.asList;
 public class TestDeltaLakeDatabricksInsertCompatibility
         extends BaseTestDeltaLakeS3Storage
 {
+    private String databricksRuntimeVersion;
+
+    @BeforeTestWithContext
+    public void setup()
+    {
+        super.setUp();
+        databricksRuntimeVersion = getDatabricksRuntimeVersion();
+    }
+
     @Test(groups = {DELTA_LAKE_DATABRICKS, DELTA_LAKE_OSS, PROFILE_SPECIFIC_TESTS})
     public void testInsertCompatibility()
     {
@@ -251,6 +263,39 @@ public class TestDeltaLakeDatabricksInsertCompatibility
         }
     }
 
+    @Test(groups = {DELTA_LAKE_DATABRICKS, DELTA_LAKE_OSS, DELTA_LAKE_EXCLUDE_73, PROFILE_SPECIFIC_TESTS})
+    public void testCheckConstraintsCompatibility()
+    {
+        // CHECK constraint is not supported by Trino
+        String tableName = "test_check_constraint_not_supported_" + randomTableSuffix();
+
+        onDelta().executeQuery("CREATE TABLE default." + tableName +
+                "(id INT,  a_number INT) " +
+                "USING DELTA " +
+                "LOCATION 's3://" + bucketName + "/databricks-compatibility-test-" + tableName + "'");
+        onDelta().executeQuery("ALTER TABLE default." + tableName + " ADD CONSTRAINT id_constraint CHECK (id < 100)");
+
+        try {
+            onDelta().executeQuery("INSERT INTO default." + tableName + " (id, a_number) VALUES (1, 1)");
+
+            assertThat(onTrino().executeQuery("SELECT id, a_number FROM " + tableName))
+                    .containsOnly(row(1, 1));
+
+            assertQueryFailure(() -> onTrino().executeQuery("INSERT INTO delta.default." + tableName + " VALUES (2, 2)"))
+                    .hasMessageMatching(".*Table default." + tableName + " requires Delta Lake writer version 3 which is not supported");
+            assertQueryFailure(() -> onTrino().executeQuery("DELETE FROM delta.default." + tableName + " WHERE a_number = 1"))
+                    .hasMessageMatching(".*Table default." + tableName + " requires Delta Lake writer version 3 which is not supported");
+            assertQueryFailure(() -> onTrino().executeQuery("UPDATE delta.default." + tableName + " SET a_number = 10 WHERE id = 1"))
+                    .hasMessageMatching(".*Table default." + tableName + " requires Delta Lake writer version 3 which is not supported");
+
+            assertThat(onTrino().executeQuery("SELECT id, a_number FROM " + tableName))
+                    .containsOnly(row(1, 1));
+        }
+        finally {
+            onDelta().executeQuery("DROP TABLE default." + tableName);
+        }
+    }
+
     @Test(groups = {DELTA_LAKE_EXCLUDE_73, PROFILE_SPECIFIC_TESTS})
     public void testGeneratedColumnsCompatibility()
     {
@@ -331,7 +376,7 @@ public class TestDeltaLakeDatabricksInsertCompatibility
                 assertThat(onTrino().executeQuery("SELECT * FROM " + trinoTableName))
                         .containsOnly(expected);
 
-                if ("ZSTD".equals(compressionCodec)) {
+                if ("ZSTD".equals(compressionCodec) && !databricksRuntimeVersion.equals(DATABRICKS_104_RUNTIME_VERSION)) {
                     assertQueryFailure(() -> onDelta().executeQuery("SELECT * FROM default." + tableName))
                             .hasMessageContaining("java.lang.ClassNotFoundException: org.apache.hadoop.io.compress.ZStandardCodec");
                 }
@@ -359,6 +404,34 @@ public class TestDeltaLakeDatabricksInsertCompatibility
                                 Stream.of(compressionCodecs())
                                         .map(arguments -> (String) getOnlyElement(asList(arguments)))
                                         .collect(toImmutableList())));
+    }
+
+    @Test(groups = {DELTA_LAKE_DATABRICKS, PROFILE_SPECIFIC_TESTS})
+    public void testPreventingWritesToTableWithNotNullableColumns()
+    {
+        String tableName = "test_preventing_inserts_into_table_with_not_nullable_columns_" + randomTableSuffix();
+
+        try {
+            onDelta().executeQuery("CREATE TABLE default." + tableName + "( " +
+                    " id INT NOT NULL, " +
+                    " a_number INT) " +
+                    "USING DELTA " +
+                    "LOCATION 's3://" + bucketName + "/databricks-compatibility-test-" + tableName + "'");
+
+            onDelta().executeQuery("INSERT INTO " + tableName + " VALUES(1,1)");
+            assertQueryFailure(() -> onTrino().executeQuery("INSERT INTO " + tableName + " VALUES (2, 2)"))
+                    .hasMessageContaining("Inserts are not supported for tables with non-nullable columns");
+            assertThat(onTrino().executeQuery("SELECT * FROM " + tableName))
+                    .containsOnly(row(1, 1));
+            onDelta().executeQuery("UPDATE " + tableName + " SET a_number = 2 WHERE id = 1");
+            assertQueryFailure(() -> onTrino().executeQuery("UPDATE " + tableName + " SET a_number = 3 WHERE id = 1"))
+                    .hasMessageContaining("Updates are not supported for tables with non-nullable columns");
+            assertThat(onTrino().executeQuery("SELECT * FROM " + tableName))
+                    .containsOnly(row(1, 2));
+        }
+        finally {
+            onDelta().executeQuery("DROP TABLE IF EXISTS " + tableName);
+        }
     }
 
     @DataProvider

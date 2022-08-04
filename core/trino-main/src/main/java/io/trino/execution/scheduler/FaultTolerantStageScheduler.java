@@ -41,6 +41,7 @@ import io.trino.execution.scheduler.PartitionMemoryEstimator.MemoryRequirements;
 import io.trino.failuredetector.FailureDetector;
 import io.trino.metadata.InternalNode;
 import io.trino.metadata.Split;
+import io.trino.server.DynamicFilterService;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.exchange.Exchange;
@@ -90,7 +91,7 @@ import static io.trino.execution.buffer.OutputBuffers.createInitialEmptyOutputBu
 import static io.trino.execution.buffer.OutputBuffers.createSpoolingExchangeOutputBuffers;
 import static io.trino.execution.scheduler.ErrorCodes.isOutOfMemoryError;
 import static io.trino.failuredetector.FailureDetector.State.GONE;
-import static io.trino.operator.ExchangeOperator.REMOTE_CONNECTOR_ID;
+import static io.trino.operator.ExchangeOperator.REMOTE_CATALOG_HANDLE;
 import static io.trino.spi.ErrorType.EXTERNAL;
 import static io.trino.spi.ErrorType.INTERNAL_ERROR;
 import static io.trino.spi.ErrorType.USER_ERROR;
@@ -168,6 +169,8 @@ public class FaultTolerantStageScheduler
     @GuardedBy("this")
     private final Map<Integer, MemoryRequirements> partitionMemoryRequirements = new HashMap<>();
 
+    private final DynamicFilterService dynamicFilterService;
+
     @GuardedBy("this")
     private Throwable failure;
     @GuardedBy("this")
@@ -192,7 +195,8 @@ public class FaultTolerantStageScheduler
             Optional<BucketNodeMap> sourceBucketNodeMap,
             AtomicInteger remainingRetryAttemptsOverall,
             int taskRetryAttemptsPerTask,
-            int maxTasksWaitingForNodePerStage)
+            int maxTasksWaitingForNodePerStage,
+            DynamicFilterService dynamicFilterService)
     {
         this.session = requireNonNull(session, "session is null");
         this.stage = requireNonNull(stage, "stage is null");
@@ -215,6 +219,7 @@ public class FaultTolerantStageScheduler
         this.minRetryDelay = Duration.ofMillis(getRetryInitialDelay(session).toMillis());
         this.maxRetryDelay = Duration.ofMillis(getRetryMaxDelay(session).toMillis());
         this.retryDelayScaleFactor = getRetryDelayScaleFactor(session);
+        this.dynamicFilterService = requireNonNull(dynamicFilterService, "dynamicFilterService is null");
         this.delayStopwatch = Stopwatch.createUnstarted(ticker);
     }
 
@@ -296,6 +301,7 @@ public class FaultTolerantStageScheduler
                                     });
                                 }
                                 if (taskSource.isFinished()) {
+                                    dynamicFilterService.stageCannotScheduleMoreTasks(stage.getStageId(), 0, allPartitions.size());
                                     sinkExchange.ifPresent(Exchange::noMoreSinks);
                                 }
                                 return null;
@@ -567,7 +573,7 @@ public class FaultTolerantStageScheduler
     {
         ImmutableListMultimap.Builder<PlanNodeId, Split> result = ImmutableListMultimap.builder();
         for (PlanNodeId planNodeId : exchangeSourceHandles.keySet()) {
-            result.put(planNodeId, new Split(REMOTE_CONNECTOR_ID, new RemoteSplit(new SpoolingExchangeInput(ImmutableList.copyOf(exchangeSourceHandles.get(planNodeId))))));
+            result.put(planNodeId, new Split(REMOTE_CATALOG_HANDLE, new RemoteSplit(new SpoolingExchangeInput(ImmutableList.copyOf(exchangeSourceHandles.get(planNodeId))))));
         }
         return result.build();
     }

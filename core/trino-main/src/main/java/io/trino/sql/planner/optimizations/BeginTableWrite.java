@@ -15,6 +15,7 @@ package io.trino.sql.planner.optimizations;
 
 import io.trino.Session;
 import io.trino.cost.StatsAndCosts;
+import io.trino.cost.TableStatsProvider;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.FunctionManager;
 import io.trino.metadata.Metadata;
@@ -24,6 +25,7 @@ import io.trino.spi.connector.BeginTableExecuteResult;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.TypeProvider;
+import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.DeleteNode;
 import io.trino.sql.planner.plan.ExchangeNode;
@@ -83,7 +85,7 @@ public class BeginTableWrite
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector, TableStatsProvider tableStatsProvider)
     {
         try {
             return SimplePlanRewriter.rewriteWith(new Rewriter(session), plan, Optional.empty());
@@ -316,6 +318,9 @@ public class BeginTableWrite
             }
             if (node instanceof MarkDistinctNode) {
                 return findTableScanHandleForDeleteOrUpdate(((MarkDistinctNode) node).getSource());
+            }
+            if (node instanceof AggregationNode) {
+                return findTableScanHandleForDeleteOrUpdate(((AggregationNode) node).getSource());
             }
             throw new IllegalArgumentException("Invalid descendant for DeleteNode or UpdateNode: " + node.getClass().getName());
         }

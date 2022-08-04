@@ -113,11 +113,14 @@ public class TransactionLogAccess
 
         tableSnapshots = EvictableCacheBuilder.newBuilder()
                 .expireAfterWrite(deltaLakeConfig.getMetadataCacheTtl().toMillis(), TimeUnit.MILLISECONDS)
+                .shareNothingWhenDisabled()
                 .recordStats()
                 .build();
         activeDataFileCache = EvictableCacheBuilder.newBuilder()
                 .weigher((Weigher<String, DeltaLakeDataFileCacheEntry>) (key, value) -> Ints.saturatedCast(estimatedSizeOf(key) + value.getRetainedSizeInBytes()))
                 .maximumWeight(deltaLakeConfig.getDataFileCacheSize().toBytes())
+                .expireAfterWrite(deltaLakeConfig.getDataFileCacheTtl().toMillis(), TimeUnit.MILLISECONDS)
+                .shareNothingWhenDisabled()
                 .recordStats()
                 .build();
     }
@@ -211,12 +214,21 @@ public class TransactionLogAccess
                 return loadActiveFiles(tableSnapshot, session, fileSystem);
             }
             else if (cachedTable.getVersion() < tableSnapshot.getVersion()) {
-                List<DeltaLakeTransactionLogEntry> newEntries = getJsonEntries(
-                        cachedTable.getVersion(),
-                        tableSnapshot.getVersion(),
-                        tableSnapshot,
-                        fileSystem);
-                DeltaLakeDataFileCacheEntry updatedCacheEntry = cachedTable.withUpdatesApplied(newEntries, tableSnapshot.getVersion());
+                DeltaLakeDataFileCacheEntry updatedCacheEntry;
+                try {
+                    List<DeltaLakeTransactionLogEntry> newEntries = getJsonEntries(
+                            cachedTable.getVersion(),
+                            tableSnapshot.getVersion(),
+                            tableSnapshot,
+                            fileSystem);
+                    updatedCacheEntry = cachedTable.withUpdatesApplied(newEntries, tableSnapshot.getVersion());
+                }
+                catch (MissingTransactionLogException e) {
+                    // Reset the cached table when there are transaction files which are newer than
+                    // the cached table version which are already garbage colllected.
+                    List<AddFileEntry> activeFiles = loadActiveFiles(tableSnapshot, session, fileSystem);
+                    updatedCacheEntry = new DeltaLakeDataFileCacheEntry(tableSnapshot.getVersion(), activeFiles);
+                }
 
                 activeDataFileCache.asMap().replace(tableLocation, cachedTable, updatedCacheEntry);
                 cachedTable = updatedCacheEntry;

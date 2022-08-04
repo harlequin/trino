@@ -101,6 +101,7 @@ public final class SystemSessionProperties
     public static final String ENABLE_INTERMEDIATE_AGGREGATIONS = "enable_intermediate_aggregations";
     public static final String PUSH_AGGREGATION_THROUGH_OUTER_JOIN = "push_aggregation_through_outer_join";
     public static final String PUSH_PARTIAL_AGGREGATION_THROUGH_JOIN = "push_partial_aggregation_through_join";
+    public static final String PRE_AGGREGATE_CASE_AGGREGATIONS_ENABLED = "pre_aggregate_case_aggregations_enabled";
     public static final String PARSE_DECIMAL_LITERALS_AS_DOUBLE = "parse_decimal_literals_as_double";
     public static final String FORCE_SINGLE_NODE_OUTPUT = "force_single_node_output";
     public static final String FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_SIZE = "filter_and_project_min_output_page_size";
@@ -168,6 +169,7 @@ public final class SystemSessionProperties
     public static final String ADAPTIVE_PARTIAL_AGGREGATION_UNIQUE_ROWS_RATIO_THRESHOLD = "adaptive_partial_aggregation_unique_rows_ratio_threshold";
     public static final String JOIN_PARTITIONED_BUILD_MIN_ROW_COUNT = "join_partitioned_build_min_row_count";
     public static final String USE_EXACT_PARTITIONING = "use_exact_partitioning";
+    public static final String FORCE_SPILLING_JOIN = "force_spilling_join";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -453,6 +455,11 @@ public final class SystemSessionProperties
                         PUSH_PARTIAL_AGGREGATION_THROUGH_JOIN,
                         "Push partial aggregations below joins",
                         optimizerConfig.isPushPartialAggregationThoughJoin(),
+                        false),
+                booleanProperty(
+                        PRE_AGGREGATE_CASE_AGGREGATIONS_ENABLED,
+                        "Pre-aggregate rows before GROUP BY with multiple CASE aggregations on same column",
+                        optimizerConfig.isPreAggregateCaseAggregationsEnabled(),
                         false),
                 booleanProperty(
                         PARSE_DECIMAL_LITERALS_AS_DOUBLE,
@@ -823,6 +830,11 @@ public final class SystemSessionProperties
                         USE_EXACT_PARTITIONING,
                         "When enabled this forces data repartitioning unless the partitioning of upstream stage matches exactly what downstream stage expects",
                         optimizerConfig.isUseExactPartitioning(),
+                        false),
+                booleanProperty(
+                        FORCE_SPILLING_JOIN,
+                        "Force the usage of spliing join operator in favor of the non-spilling one, even if spill is not enabled",
+                        featuresConfig.isForceSpillingJoin(),
                         false));
     }
 
@@ -1071,6 +1083,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(PUSH_PARTIAL_AGGREGATION_THROUGH_JOIN, Boolean.class);
     }
 
+    public static boolean isPreAggregateCaseAggregationsEnabled(Session session)
+    {
+        return session.getSystemProperty(PRE_AGGREGATE_CASE_AGGREGATIONS_ENABLED, Boolean.class);
+    }
+
     public static boolean isParseDecimalLiteralsAsDouble(Session session)
     {
         return session.getSystemProperty(PARSE_DECIMAL_LITERALS_AS_DOUBLE, Boolean.class);
@@ -1269,10 +1286,6 @@ public final class SystemSessionProperties
 
     public static boolean isEnableDynamicFiltering(Session session)
     {
-        if (getRetryPolicy(session) == RetryPolicy.TASK) {
-            // dynamic filtering is not supported with task level failure recovery enabled
-            return false;
-        }
         return session.getSystemProperty(ENABLE_DYNAMIC_FILTERING, Boolean.class);
     }
 
@@ -1474,5 +1487,10 @@ public final class SystemSessionProperties
     public static boolean isUseExactPartitioning(Session session)
     {
         return session.getSystemProperty(USE_EXACT_PARTITIONING, Boolean.class);
+    }
+
+    public static boolean isForceSpillingOperator(Session session)
+    {
+        return session.getSystemProperty(FORCE_SPILLING_JOIN, Boolean.class);
     }
 }

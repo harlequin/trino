@@ -237,8 +237,12 @@ public class FileHiveMetastore
         getRequiredDatabase(databaseName);
         verifyDatabaseNotExists(newDatabaseName);
 
+        Path oldDatabaseMetadataDirectory = getDatabaseMetadataDirectory(databaseName);
+        Path newDatabaseMetadataDirectory = getDatabaseMetadataDirectory(newDatabaseName);
         try {
-            if (!metadataFileSystem.rename(getDatabaseMetadataDirectory(databaseName), getDatabaseMetadataDirectory(newDatabaseName))) {
+            renameSchemaFile(DATABASE, oldDatabaseMetadataDirectory, newDatabaseMetadataDirectory);
+
+            if (!metadataFileSystem.rename(oldDatabaseMetadataDirectory, newDatabaseMetadataDirectory)) {
                 throw new TrinoException(HIVE_METASTORE_ERROR, "Could not rename database metadata directory");
             }
         }
@@ -308,7 +312,7 @@ public class FileHiveMetastore
             checkArgument(table.getStorage().getLocation().isEmpty(), "Storage location for view must be empty");
         }
         else if (table.getTableType().equals(MANAGED_TABLE.name())) {
-            if (!tableMetadataDirectory.equals(new Path(table.getStorage().getLocation()))) {
+            if (!(new Path(table.getStorage().getLocation()).toString().contains(tableMetadataDirectory.toString()))) {
                 throw new TrinoException(HIVE_METASTORE_ERROR, "Table directory must be " + tableMetadataDirectory);
             }
         }
@@ -1328,6 +1332,18 @@ public class FileHiveMetastore
         }
         catch (Exception e) {
             throw new TrinoException(HIVE_METASTORE_ERROR, "Could not write " + type, e);
+        }
+    }
+
+    private void renameSchemaFile(SchemaType type, Path oldMetadataDirectory, Path newMetadataDirectory)
+    {
+        try {
+            if (!metadataFileSystem.rename(getSchemaPath(type, oldMetadataDirectory), getSchemaPath(type, newMetadataDirectory))) {
+                throw new TrinoException(HIVE_METASTORE_ERROR, "Could not rename " + type + " schema");
+            }
+        }
+        catch (IOException e) {
+            throw new TrinoException(HIVE_METASTORE_ERROR, "Could not rename " + type + " schema", e);
         }
     }
 

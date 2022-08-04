@@ -35,6 +35,7 @@ import io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavi
 import io.trino.plugin.hive.LocationService.WriteInfo;
 import io.trino.plugin.hive.acid.AcidOperation;
 import io.trino.plugin.hive.acid.AcidTransaction;
+import io.trino.plugin.hive.aws.athena.PartitionProjectionService;
 import io.trino.plugin.hive.fs.DirectoryLister;
 import io.trino.plugin.hive.metastore.Column;
 import io.trino.plugin.hive.metastore.Database;
@@ -120,6 +121,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.ql.exec.FileSinkOperator;
+import org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat;
 import org.apache.hadoop.hive.serde.serdeConstants;
 import org.apache.hadoop.hive.serde2.OpenCSVSerde;
 import org.apache.hadoop.mapred.JobConf;
@@ -363,6 +365,7 @@ public class HiveMetadata
     private final HiveMaterializedViewMetadata hiveMaterializedViewMetadata;
     private final AccessControlMetadata accessControlMetadata;
     private final DirectoryLister directoryLister;
+    private final PartitionProjectionService partitionProjectionService;
 
     public HiveMetadata(
             CatalogName catalogName,
@@ -385,7 +388,8 @@ public class HiveMetadata
             Set<SystemTableProvider> systemTableProviders,
             HiveMaterializedViewMetadata hiveMaterializedViewMetadata,
             AccessControlMetadata accessControlMetadata,
-            DirectoryLister directoryLister)
+            DirectoryLister directoryLister,
+            PartitionProjectionService partitionProjectionService)
     {
         this.catalogName = requireNonNull(catalogName, "catalogName is null");
         this.metastore = requireNonNull(metastore, "metastore is null");
@@ -408,6 +412,7 @@ public class HiveMetadata
         this.hiveMaterializedViewMetadata = requireNonNull(hiveMaterializedViewMetadata, "hiveMaterializedViewMetadata is null");
         this.accessControlMetadata = requireNonNull(accessControlMetadata, "accessControlMetadata is null");
         this.directoryLister = requireNonNull(directoryLister, "directoryLister is null");
+        this.partitionProjectionService = requireNonNull(partitionProjectionService, "partitionProjectionService is null");
     }
 
     @Override
@@ -656,6 +661,9 @@ public class HiveMetadata
         if (parseBoolean(autoPurgeProperty)) {
             properties.put(AUTO_PURGE, true);
         }
+
+        // Partition Projection specific properties
+        properties.putAll(partitionProjectionService.getPartitionProjectionTrinoTableProperties(table));
 
         return new ConnectorTableMetadata(tableName, columns.build(), properties.buildOrThrow(), comment);
     }
@@ -1050,6 +1058,9 @@ public class HiveMetadata
         // Table comment property
         tableMetadata.getComment().ifPresent(value -> tableProperties.put(TABLE_COMMENT, value));
 
+        // Partition Projection specific properties
+        tableProperties.putAll(partitionProjectionService.getPartitionProjectionHiveTableProperties(tableMetadata));
+
         return tableProperties.buildOrThrow();
     }
 
@@ -1255,6 +1266,34 @@ public class HiveMetadata
     {
         HiveTableHandle handle = (HiveTableHandle) tableHandle;
         metastore.commentTable(handle.getSchemaName(), handle.getTableName(), comment);
+    }
+
+    @Override
+    public void setViewComment(ConnectorSession session, SchemaTableName viewName, Optional<String> comment)
+    {
+        Table view = metastore.getTable(viewName.getSchemaName(), viewName.getTableName())
+                .orElseThrow(() -> new ViewNotFoundException(viewName));
+        if (translateHiveViews && !isPrestoView(view)) {
+            throw new HiveViewNotSupportedException(viewName);
+        }
+
+        ConnectorViewDefinition definition = toConnectorViewDefinition(session, viewName, Optional.of(view))
+                .orElseThrow(() -> new ViewNotFoundException(viewName));
+        ConnectorViewDefinition newDefinition = new ConnectorViewDefinition(
+                definition.getOriginalSql(),
+                definition.getCatalog(),
+                definition.getSchema(),
+                definition.getColumns(),
+                comment,
+                definition.getOwner(),
+                definition.isRunAsInvoker());
+
+        Table.Builder viewBuilder = Table.builder(view)
+                .setViewOriginalText(Optional.of(encodeViewData(newDefinition)));
+
+        PrincipalPrivileges principalPrivileges = accessControlMetadata.isUsingSystemSecurity() ? NO_PRIVILEGES : buildInitialPrivilegeSet(session.getUser());
+
+        metastore.replaceTable(viewName.getSchemaName(), viewName.getTableName(), viewBuilder.build(), principalPrivileges);
     }
 
     @Override
@@ -1626,8 +1665,14 @@ public class HiveMetadata
             schema = getHiveSchema(table);
             format = table.getStorage().getStorageFormat();
         }
+
+        HiveCompressionCodec compression = selectCompressionCodec(session, format);
+        if (format.getOutputFormat().equals(OrcOutputFormat.class.getName()) && (compression == HiveCompressionCodec.ZSTD)) {
+            compression = HiveCompressionCodec.GZIP; // ZSTD not supported by Hive ORC writer
+        }
         JobConf conf = toJobConf(hdfsEnvironment.getConfiguration(new HdfsContext(session), path));
-        configureCompression(conf, selectCompressionCodec(session, format));
+        configureCompression(conf, compression);
+
         hdfsEnvironment.doAs(session.getIdentity(), () -> {
             for (String fileName : fileNames) {
                 writeEmptyFile(session, new Path(path, fileName), conf, schema, format.getSerde(), format.getOutputFormat());
@@ -2443,7 +2488,12 @@ public class HiveMetadata
         if (isHiveSystemSchema(viewName.getSchemaName())) {
             return Optional.empty();
         }
-        return metastore.getTable(viewName.getSchemaName(), viewName.getTableName())
+        return toConnectorViewDefinition(session, viewName, metastore.getTable(viewName.getSchemaName(), viewName.getTableName()));
+    }
+
+    private Optional<ConnectorViewDefinition> toConnectorViewDefinition(ConnectorSession session, SchemaTableName viewName, Optional<Table> table)
+    {
+        return table
                 .filter(ViewReaderUtil::canDecodeView)
                 .map(view -> {
                     if (!translateHiveViews && !isPrestoView(view)) {
@@ -3388,7 +3438,7 @@ public class HiveMetadata
         }
     }
 
-    private static Function<HiveColumnHandle, ColumnMetadata> columnMetadataGetter(Table table)
+    private Function<HiveColumnHandle, ColumnMetadata> columnMetadataGetter(Table table)
     {
         ImmutableList.Builder<String> columnNames = ImmutableList.builder();
         table.getPartitionColumns().stream().map(Column::getName).forEach(columnNames::add);
@@ -3418,6 +3468,7 @@ public class HiveMetadata
                 .setComment(handle.isHidden() ? Optional.empty() : columnComment.get(handle.getName()))
                 .setExtraInfo(Optional.ofNullable(columnExtraInfo(handle.isPartitionKey())))
                 .setHidden(handle.isHidden())
+                .setProperties(partitionProjectionService.getPartitionProjectionTrinoColumnProperties(table, handle.getName()))
                 .build();
     }
 

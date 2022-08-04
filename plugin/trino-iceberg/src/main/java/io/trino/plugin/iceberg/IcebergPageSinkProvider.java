@@ -26,7 +26,6 @@ import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
-import io.trino.spi.connector.SchemaTableName;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.PartitionSpecParser;
 import org.apache.iceberg.Schema;
@@ -45,6 +44,7 @@ public class IcebergPageSinkProvider
     private final JsonCodec<CommitTaskData> jsonCodec;
     private final IcebergFileWriterFactory fileWriterFactory;
     private final PageIndexerFactory pageIndexerFactory;
+    private final FileIoProvider fileIoProvider;
     private final int maxOpenPartitions;
 
     @Inject
@@ -53,12 +53,14 @@ public class IcebergPageSinkProvider
             JsonCodec<CommitTaskData> jsonCodec,
             IcebergFileWriterFactory fileWriterFactory,
             PageIndexerFactory pageIndexerFactory,
+            FileIoProvider fileIoProvider,
             IcebergConfig config)
     {
         this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
         this.jsonCodec = requireNonNull(jsonCodec, "jsonCodec is null");
         this.fileWriterFactory = requireNonNull(fileWriterFactory, "fileWriterFactory is null");
         this.pageIndexerFactory = requireNonNull(pageIndexerFactory, "pageIndexerFactory is null");
+        this.fileIoProvider = requireNonNull(fileIoProvider, "fileIoProvider is null");
         requireNonNull(config, "config is null");
         this.maxOpenPartitions = config.getMaxPartitionsPerWriter();
     }
@@ -80,8 +82,7 @@ public class IcebergPageSinkProvider
         HdfsContext hdfsContext = new HdfsContext(session);
         Schema schema = SchemaParser.fromJson(tableHandle.getSchemaAsJson());
         PartitionSpec partitionSpec = PartitionSpecParser.fromJson(schema, tableHandle.getPartitionSpecAsJson());
-        LocationProvider locationProvider = getLocationProvider(new SchemaTableName(tableHandle.getSchemaName(), tableHandle.getTableName()),
-                tableHandle.getOutputPath(), tableHandle.getStorageProperties());
+        LocationProvider locationProvider = getLocationProvider(tableHandle.getName(), tableHandle.getOutputPath(), tableHandle.getStorageProperties());
         return new IcebergPageSink(
                 schema,
                 partitionSpec,
@@ -90,6 +91,7 @@ public class IcebergPageSinkProvider
                 pageIndexerFactory,
                 hdfsEnvironment,
                 hdfsContext,
+                fileIoProvider,
                 tableHandle.getInputColumns(),
                 jsonCodec,
                 session,
@@ -118,6 +120,7 @@ public class IcebergPageSinkProvider
                         pageIndexerFactory,
                         hdfsEnvironment,
                         hdfsContext,
+                        fileIoProvider,
                         optimizeHandle.getTableColumns(),
                         jsonCodec,
                         session,
