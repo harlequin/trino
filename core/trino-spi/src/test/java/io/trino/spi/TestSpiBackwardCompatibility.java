@@ -22,6 +22,7 @@ import io.trino.spi.connector.ConnectorContext;
 import org.testng.annotations.Test;
 
 import java.io.IOException;
+import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -30,6 +31,8 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -37,6 +40,7 @@ import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Sets.difference;
 import static java.lang.ClassLoader.getPlatformClassLoader;
 import static java.lang.ClassLoader.getSystemClassLoader;
+import static java.lang.String.format;
 import static java.lang.reflect.Modifier.isPublic;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -55,22 +59,12 @@ public class TestSpiBackwardCompatibility
             // example
             .put("123", "Field: public java.util.List<io.trino.spi.predicate.Range> io.trino.spi.predicate.BenchmarkSortedRangeSet$Data.ranges")
             .put("377", "Constructor: public io.trino.spi.memory.MemoryPoolInfo(long,long,long,java.util.Map<io.trino.spi.QueryId, java.lang.Long>,java.util.Map<io.trino.spi.QueryId, java.util.List<io.trino.spi.memory.MemoryAllocation>>,java.util.Map<io.trino.spi.QueryId, java.lang.Long>)")
-            .put("382", "Method: public io.trino.spi.ptf.TableArgumentSpecification$Builder io.trino.spi.ptf.TableArgumentSpecification$Builder.rowSemantics(boolean)")
-            .put("382", "Method: public io.trino.spi.ptf.TableArgumentSpecification$Builder io.trino.spi.ptf.TableArgumentSpecification$Builder.pruneWhenEmpty(boolean)")
-            .put("382", "Method: public io.trino.spi.ptf.TableArgumentSpecification$Builder io.trino.spi.ptf.TableArgumentSpecification$Builder.passThroughColumns(boolean)")
-            .put("382", "Class: public abstract class io.trino.spi.ptf.ConnectorTableFunction")
-            .put("382", "Constructor: public io.trino.spi.ptf.ConnectorTableFunction(java.lang.String,java.lang.String,java.util.List<io.trino.spi.ptf.ArgumentSpecification>,io.trino.spi.ptf.ReturnTypeSpecification)")
-            .put("382", "Method: public java.util.List<io.trino.spi.ptf.ArgumentSpecification> io.trino.spi.ptf.ConnectorTableFunction.getArguments()")
-            .put("382", "Method: public io.trino.spi.ptf.ReturnTypeSpecification io.trino.spi.ptf.ConnectorTableFunction.getReturnTypeSpecification()")
-            .put("382", "Method: public java.lang.String io.trino.spi.ptf.ConnectorTableFunction.getName()")
-            .put("382", "Method: public java.lang.String io.trino.spi.ptf.ConnectorTableFunction.getSchema()")
             .put("383", "Method: public abstract java.lang.String io.trino.spi.function.AggregationState.value()")
             .put("383", "Method: public default void io.trino.spi.security.SystemAccessControl.checkCanExecuteFunction(io.trino.spi.security.SystemSecurityContext,io.trino.spi.connector.CatalogSchemaRoutineName)")
             .put("383", "Method: public default void io.trino.spi.connector.ConnectorAccessControl.checkCanExecuteFunction(io.trino.spi.connector.ConnectorSecurityContext,io.trino.spi.connector.SchemaRoutineName)")
             .put("384", "Constructor: public io.trino.spi.eventlistener.QueryInputMetadata(java.lang.String,java.lang.String,java.lang.String,java.util.List<java.lang.String>,java.util.Optional<java.lang.Object>,java.util.OptionalLong,java.util.OptionalLong)")
             .put("386", "Method: public default java.util.stream.Stream<io.trino.spi.connector.TableColumnsMetadata> io.trino.spi.connector.ConnectorMetadata.streamTableColumns(io.trino.spi.connector.ConnectorSession,io.trino.spi.connector.SchemaTablePrefix)")
             .put("386", "Method: public default boolean io.trino.spi.connector.ConnectorMetadata.isSupportedVersionType(io.trino.spi.connector.ConnectorSession,io.trino.spi.connector.SchemaTableName,io.trino.spi.connector.PointerType,io.trino.spi.type.Type)")
-            .put("386", "Method: public static io.trino.spi.ptf.TableArgumentSpecification$Builder io.trino.spi.ptf.TableArgumentSpecification.builder(java.lang.String)")
             .put("387", "Constructor: public io.trino.spi.eventlistener.QueryContext(java.lang.String,java.util.Optional<java.lang.String>,java.util.Set<java.lang.String>,java.util.Optional<java.lang.String>,java.util.Optional<java.lang.String>,java.util.Optional<java.lang.String>,java.util.Optional<java.lang.String>,java.util.Set<java.lang.String>,java.util.Set<java.lang.String>,java.util.Optional<java.lang.String>,java.util.Optional<java.lang.String>,java.util.Optional<java.lang.String>,java.util.Optional<io.trino.spi.resourcegroups.ResourceGroupId>,java.util.Map<java.lang.String, java.lang.String>,io.trino.spi.session.ResourceEstimates,java.lang.String,java.lang.String,java.lang.String,java.util.Optional<io.trino.spi.resourcegroups.QueryType>)")
             .put("388", "Method: public abstract java.util.concurrent.CompletableFuture<io.trino.spi.connector.ConnectorSplitSource$ConnectorSplitBatch> io.trino.spi.connector.ConnectorSplitSource.getNextBatch(io.trino.spi.connector.ConnectorPartitionHandle,int)")
             .put("388", "Method: public java.util.concurrent.CompletableFuture<io.trino.spi.connector.ConnectorSplitSource$ConnectorSplitBatch> io.trino.spi.connector.FixedSplitSource.getNextBatch(io.trino.spi.connector.ConnectorPartitionHandle,int)")
@@ -141,9 +135,19 @@ public class TestSpiBackwardCompatibility
 
     private static void addClassEntities(ImmutableSet.Builder<String> entities, Class<?> clazz, boolean includeDeprecated)
     {
+        if (isExperimental(clazz, "class " + clazz.getName())) {
+            return;
+        }
+
         if (!isPublic(clazz.getModifiers())) {
             return;
         }
+
+        // TODO remove this after Experimental is released
+        if (isOriginalPtfClass(clazz, includeDeprecated)) {
+            return;
+        }
+
         for (Class<?> nestedClass : clazz.getDeclaredClasses()) {
             addClassEntities(entities, nestedClass, includeDeprecated);
         }
@@ -152,12 +156,18 @@ public class TestSpiBackwardCompatibility
         }
         entities.add("Class: " + clazz.toGenericString());
         for (Constructor<?> constructor : clazz.getConstructors()) {
+            if (isExperimental(constructor, "constructor " + constructor)) {
+                continue;
+            }
             if (!includeDeprecated && constructor.isAnnotationPresent(Deprecated.class)) {
                 continue;
             }
             entities.add("Constructor: " + constructor.toGenericString());
         }
         for (Method method : clazz.getDeclaredMethods()) {
+            if (isExperimental(method, "method " + method)) {
+                continue;
+            }
             if (!isPublic(method.getModifiers())) {
                 continue;
             }
@@ -167,6 +177,9 @@ public class TestSpiBackwardCompatibility
             entities.add("Method: " + method.toGenericString());
         }
         for (Field field : clazz.getDeclaredFields()) {
+            if (isExperimental(field, "field " + field)) {
+                continue;
+            }
             if (!isPublic(field.getModifiers())) {
                 continue;
             }
@@ -175,5 +188,28 @@ public class TestSpiBackwardCompatibility
             }
             entities.add("Field: " + field.toGenericString());
         }
+    }
+
+    private static boolean isExperimental(AnnotatedElement element, String description)
+    {
+        if (!element.isAnnotationPresent(Experimental.class)) {
+            return false;
+        }
+
+        // validate the annotation while we have access to the annotation
+        String date = element.getAnnotation(Experimental.class).eta();
+        try {
+            LocalDate.parse(date);
+        }
+        catch (DateTimeParseException e) {
+            throw new AssertionError(format("Invalid date '%s' in Experimental annotation on %s", date, description));
+        }
+        return true;
+    }
+
+    // TODO remove this after Experimental is released
+    private static boolean isOriginalPtfClass(Class<?> clazz, boolean includeDeprecated)
+    {
+        return !includeDeprecated && clazz.getName().startsWith("io.trino.spi.ptf.");
     }
 }
