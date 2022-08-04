@@ -57,8 +57,6 @@ import org.bson.Document;
 import org.bson.types.Binary;
 import org.bson.types.ObjectId;
 
-import java.time.Instant;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
@@ -93,7 +91,6 @@ import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
-import static java.time.ZoneOffset.UTC;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MINUTES;
@@ -516,15 +513,15 @@ public class MongoSession
         }
 
         if (type == DATE) {
-            return Optional.of(Instant.ofEpochMilli(TimeUnit.DAYS.toMillis((Long) trinoNativeValue)).atZone(UTC).toLocalDate());
+            return Optional.of(new Date(TimeUnit.DAYS.toMillis((Long) trinoNativeValue)));
         }
 
         if (type == TIMESTAMP_MILLIS) {
-            return Optional.of(LocalDateTime.ofInstant(Instant.ofEpochMilli(TimeUnit.MILLISECONDS.convert((Long) trinoNativeValue, TimeUnit.MICROSECONDS)), UTC));
+            return Optional.of(new Date(TimeUnit.MILLISECONDS.convert((Long) trinoNativeValue, TimeUnit.MICROSECONDS)));
         }
 
         if (type == TIMESTAMP_TZ_MILLIS) {
-            return Optional.of(LocalDateTime.ofInstant(Instant.ofEpochMilli(unpackMillisUtc((long) trinoNativeValue)), UTC));
+            return Optional.of(new Date(unpackMillisUtc((Long) trinoNativeValue)));
         }
 
         if (type instanceof ObjectIdType) {
